@@ -100,56 +100,6 @@ static sp<MediaSource> Make##name(const sp<MediaSource> &source, const sp<MetaDa
     return new name(source, meta); \
 }
 
-#ifdef QCOM_HARDWARE
-class ColorFormatInfo {
-    private:
-        enum {
-            LOCAL = 0,
-            REMOTE = 1,
-            END = 2
-        };
-        static const int32_t preferredColorFormat[END];
-    public:
-        static int32_t getPreferredColorFormat(bool isLocal) {
-            char colorformat[10]="";
-            if(!property_get("sf.debug.colorformat", colorformat, NULL)){
-                if(isLocal) {
-                    return preferredColorFormat[LOCAL];
-                }
-                return preferredColorFormat[REMOTE];
-            } else {
-                if(!strcmp(colorformat, "yamato")) {
-                    return QOMX_COLOR_FormatYVU420PackedSemiPlanar32m4ka;
-                }
-                return preferredColorFormat[LOCAL];
-            }
-        }
-};
-
-const int32_t ColorFormatInfo::preferredColorFormat[] = {
-#ifdef TARGET7x30
-    QOMX_COLOR_FormatYUV420PackedSemiPlanar64x32Tile2m8ka,
-    QOMX_COLOR_FormatYUV420PackedSemiPlanar64x32Tile2m8ka
-#endif
-#ifdef TARGET8x60
-    QOMX_COLOR_FormatYUV420PackedSemiPlanar64x32Tile2m8ka,
-    QOMX_COLOR_FormatYUV420PackedSemiPlanar64x32Tile2m8ka
-#endif
-#ifdef TARGET7x27
-    OMX_QCOM_COLOR_FormatYVU420SemiPlanar,
-    OMX_QCOM_COLOR_FormatYVU420SemiPlanar
-    //QOMX_COLOR_FormatYVU420PackedSemiPlanar32m4ka
-#endif
-#ifdef TARGET7x27A
-    OMX_QCOM_COLOR_FormatYVU420SemiPlanar,
-    OMX_QCOM_COLOR_FormatYVU420SemiPlanar
-#endif
-#ifdef TARGET8x50
-    OMX_QCOM_COLOR_FormatYVU420SemiPlanar,
-    QOMX_COLOR_FormatYVU420PackedSemiPlanar32m4ka
-#endif
-};
-#endif
 #define FACTORY_REF(name) { #name, Make##name },
 
 FACTORY_CREATE_ENCODER(AACEncoder)
@@ -364,12 +314,6 @@ uint32_t OMXCodec::getComponentQuirks(
                 index, "requires-wma-pro-component")) {
         quirks |= kRequiresWMAProComponent;
     }
-#if defined(QCOM_LEGACY_OMX) || !defined(QCOM_HARDWARE)
-    if (list->codecHasQuirk(
-                index, "requires-larger-encoder-output-buffer")) {
-            quirks |= kRequiresLargerEncoderOutputBuffer;
-    }
-#endif
 #endif
     return quirks;
 }
@@ -808,10 +752,6 @@ status_t OMXCodec::configureCodec(const sp<MetaData> &meta) {
             status_t err = mOMX->getExtensionIndex(
                 mNode, OMX_QCOM_INDEX_PARAM_VIDEO_SYNCFRAMEDECODINGMODE, &indexType);
 
-#ifdef QCOM_LEGACY_OMX
-            // Don't run this check with the legacy encoder
-            if (strncmp(mComponentName, "OMX.qcom.video.encoder.", 23))
-#endif
             CHECK_EQ(err, (status_t)OK);
 
             enableType.bEnable = OMX_TRUE;
@@ -1078,12 +1018,6 @@ static size_t getFrameSize(
         case OMX_SEC_COLOR_FormatNV12LPhysicalAddress:
 #endif
             return (width * height * 3) / 2;
-
-#ifdef QCOM_LEGACY_OMX
-    case OMX_QCOM_COLOR_FormatYVU420SemiPlanar:
-        return (((width + 15) & -16) * ((height + 15) & -16) * 3) / 2;
-#endif
-
 
 #ifdef EXYNOS4_ENHANCEMENTS
         case OMX_SEC_COLOR_FormatNV12LVirtualAddress:
@@ -1637,17 +1571,6 @@ status_t OMXCodec::setVideoOutputFormat(
         OMX_VIDEO_PARAM_PORTFORMATTYPE format;
         InitOMXParams(&format);
         format.nPortIndex = kPortIndexOutput;
-#if defined(QCOM_HARDWARE) && !defined(QCOM_LEGACY_OMX)
-        if (!strncmp(mComponentName, "OMX.qcom",8)) {
-            int32_t reqdColorFormat = ColorFormatInfo::getPreferredColorFormat(mOMXLivesLocally);
-            for(format.nIndex = 0;
-                    (OK == mOMX->getParameter(mNode, OMX_IndexParamVideoPortFormat, &format, sizeof(format)));
-                    format.nIndex++) {
-                if(format.eColorFormat == reqdColorFormat)
-                    break;
-            }
-        } else
-#endif
         format.nIndex = 0;
 
         status_t err = mOMX->getParameter(
@@ -2013,7 +1936,6 @@ status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
     }
 
     status_t err = OK;
-#ifndef QCOM_LEGACY_OMX
     if ((mFlags & kStoreMetaDataInVideoBuffers)
             && portIndex == kPortIndexInput) {
         ALOGW("Trying to enable metadata mode on encoder");
@@ -2023,7 +1945,6 @@ status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
             return err;
         }
     }
-#endif
 
     OMX_PARAM_PORTDEFINITIONTYPE def;
     InitOMXParams(&def);
@@ -2036,36 +1957,12 @@ status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
         return err;
     }
 
-#if defined(QCOM_HARDWARE) && !defined(QCOM_LEGACY_OMX)
-    if (mFlags & kUseMinBufferCount) {
-        def.nBufferCountActual = def.nBufferCountMin;
-        if (!mIsEncoder) {
-                if (portIndex == kPortIndexOutput) {
-                    def.nBufferCountActual += 2;
-                }else {
-                    def.nBufferCountActual += 1;
-                }
-        }
-        err = mOMX->setParameter(
-                    mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
-        if (err != OK) {
-            CODEC_LOGE("setting nBufferCountActual to %lu failed: %d",
-                    def.nBufferCountActual, err);
-            return err;
-        }
-    }
-#endif
-
     CODEC_LOGV("allocating %lu buffers of size %lu on %s port",
             def.nBufferCountActual, def.nBufferSize,
             portIndex == kPortIndexInput ? "input" : "output");
 
     size_t totalSize = def.nBufferCountActual * def.nBufferSize;
-#ifdef ECLAIR_LIBCAMERA
-    mDealer[portIndex] = new MemoryDealer(totalSize);
-#else
     mDealer[portIndex] = new MemoryDealer(totalSize, "OMXCodec");
-#endif
 
     for (OMX_U32 i = 0; i < def.nBufferCountActual; ++i) {
         sp<IMemory> mem = mDealer[portIndex]->allocate(def.nBufferSize);
@@ -3844,7 +3741,11 @@ bool OMXCodec::drainInputBuffer(BufferInfo *info) {
 
                 status_t err = mOMX->getParameter(mNode, OMX_IndexParamPortDefinition,
                                                   &def, sizeof(def));
-                CHECK_EQ(err, (status_t)OK);
+#ifdef QCOM_LEGACY_OMX
+                // Don't run this check with the legacy encoder
+                if (strncmp(mComponentName, "OMX.qcom.video.encoder.", 23))
+#endif
+                    CHECK_EQ(err, (status_t)OK);
 
                 if (def.eDomain == OMX_PortDomainVideo) {
                     OMX_VIDEO_PORTDEFINITIONTYPE *videoDef = &def.format.video;
@@ -5516,6 +5417,12 @@ void OMXCodec::initOutputFormat(const sp<MetaData> &inputFormat) {
 
             mOutputFormat->setInt32(kKeyWidth, video_def->nFrameWidth);
             mOutputFormat->setInt32(kKeyHeight, video_def->nFrameHeight);
+#ifdef QCOM_LEGACY_OMX
+            // With legacy codec we get wrong color format here
+            if (!strncmp(mComponentName, "OMX.qcom.", 9))
+                mOutputFormat->setInt32(kKeyColorFormat, OMX_QCOM_COLOR_FormatYVU420SemiPlanar);
+            else
+#endif
             mOutputFormat->setInt32(kKeyColorFormat, video_def->eColorFormat);
 
             if (!mIsEncoder) {
